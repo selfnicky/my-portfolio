@@ -1,0 +1,31 @@
+# This is a basic workflow to help you get started with Actions
+
+name: CI
+
+
+on:
+  
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+  
+  workflow_dispatch:
+
+
+jobs:
+
+  build:
+   
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image
+        run: docker build -t selfnk/portfolio .
+
+      
+      - name: push image
+        run: |
+          docker login -u selfnk -p ${[{ secrets.REGISTRY_PASS }]}
+            docker push selfnk/portfolio
