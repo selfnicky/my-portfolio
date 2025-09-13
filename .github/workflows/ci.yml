@@ -2,30 +2,25 @@
 
 name: CI
 
-
 on:
-  
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-
-  
   workflow_dispatch:
 
-
 jobs:
-
   build:
-   
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: build image
+
+      - name: Build Docker image
         run: docker build -t selfnk/portfolio .
 
-      
-      - name: push image
+      - name: Push Docker image
+        env:
+          REGISTRY_PASS: ${{ secrets.REGISTRY_PASS }}
         run: |
-          docker login -u selfnk -p ${[{ secrets.REGISTRY_PASS }]}
-            docker push selfnk/portfolio
+          echo "$REGISTRY_PASS" | docker login -u selfnk --password-stdin
+          docker push selfnk/portfolio
