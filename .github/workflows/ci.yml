@@ -1,5 +1,3 @@
-# This is a basic workflow to build and push a Docker image with GitHub Actions
-
 name: CI
 
 on:
@@ -17,8 +15,8 @@ jobs:
 
       - name: Build Docker image
         run: |
-             docker build -t ${{ secrets.REGISTRY_USER }}/portfolio:${{GitHub.run_number}} .
-             docker build -t ${{ secrets.REGISTRY_USER }}/portfolio .
+          docker build -t ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} .
+          docker build -t ${{ secrets.REGISTRY_USER }}/portfolio .
 
       - name: Push Docker image
         env:
@@ -26,21 +24,21 @@ jobs:
           REGISTRY_PASS: ${{ secrets.REGISTRY_PASS }}
         run: |
           echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin
-          docker push $REGISTRY_USER/portfolio:${{GitHub.run_number}}
+          docker push $REGISTRY_USER/portfolio:${{ github.run_number }}
           docker push $REGISTRY_USER/portfolio
-  
-  deploy:
+
+  deploy:   # 👈 aligned with "build"
     needs: build
     runs-on: ubuntu-latest
     steps:
       - name: SSH to Server
         uses: appleboy/ssh-action@v1.6.0
-
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.KEY }}
-        #  port: ${{ secrets.PORT }}
+          # port: ${{ secrets.PORT }}
           script: |
             docker rm -f resume || true
-            docker run -d  --name resume -p 8080:5001  docker push $REGISTRY_USER/portfolio:${{GitHub.run_number}}
+            docker pull ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
+            docker run -d --name resume -p 8080:5001 ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
