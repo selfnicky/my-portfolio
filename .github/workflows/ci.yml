@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD Pipeline
 
 on:
   push:
@@ -13,12 +13,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 1️⃣ Setup tools
+      - name: Set up Node.js (for lint/test) # Change if Python, Go, etc.
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install   # Or pip install -r requirements.txt, etc.
+
+      # 2️⃣ Run linting
+      - name: Run Linter
+        run: npm run lint || echo "Lint warnings found"
+
+      # 3️⃣ Run tests
+      - name: Run Unit Tests
+        run: npm test --if-present
+
+      # 4️⃣ Build Docker image
       - name: Build Docker image
         run: |
           docker build -t ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} .
           docker build -t ${{ secrets.REGISTRY_USER }}/portfolio .
 
+      # 5️⃣ Trivy Security Scan
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
+          format: table
+          exit-code: 1         # fail if HIGH/CRITICAL vulnerabilities
+          ignore-unfixed: true
+
+      # 6️⃣ Push image to registry
       - name: Push Docker image
+        if: success()
         env:
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           REGISTRY_PASS: ${{ secrets.REGISTRY_PASS }}
@@ -27,12 +56,13 @@ jobs:
           docker push $REGISTRY_USER/portfolio:${{ github.run_number }}
           docker push $REGISTRY_USER/portfolio
 
-  deploy:   # 👈 aligned with "build"
+  deploy:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: SSH to Server
-        uses: appleboy/ssh-action@v1
+      # 7️⃣ Deploy via SSH to server
+      - name: SSH to Server and Deploy
+        uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
