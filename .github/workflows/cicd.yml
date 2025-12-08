@@ -15,7 +15,7 @@ env:
   IMAGE_NAME: "portfolio"
   AWS_REGION: "us-east-1"
   ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
-  ECR_REPO: "${{ secrets.ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/portfolio"
+  ECR_REPO: ${{ secrets.ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/portfolio
 
 jobs:
   build:
@@ -37,13 +37,12 @@ jobs:
         run: pytest test.py
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
       - name: Build Docker image
@@ -67,8 +66,19 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
-      # Add your deploy step here (ECS, Lambda, EC2, S3, etc.)
-     # - name: Deploy Placeholder
-      #  run: echo "Add ECS/Lambda deploy steps here"
+      # Add your deployment method:
+      # ECS / Lambda / EC2 / S3 + CloudFront, etc.
+    #  - name: Deployment Placeholder
+    #    run: echo "Add ECS/Lambda/EC2 deployment steps here"
+    #        host: ${{ secrets.SERVER_HOST }}
+    #        username: ${{ secrets.SERVER_USER }}
+    #        key: ${{ secrets.SERVER_SSH_KEY }}
+    ##        port: ${{ secrets.SERVER_SSH_PORT || '22' }}
+    #        script: |
+    #           cd /path/to/deployment/directory
+    #            docker pull ${{ secrets.REGISTRY_USER }}/portfolio:latest
+    #            docker stop portfolio || true
+    #            docker rm portfolio || true
+    #            docker run -d --name portfolio -p 80:80 ${{ secrets.REGISTRY_USER }}/portfolio:latest
