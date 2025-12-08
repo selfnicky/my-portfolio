@@ -1,0 +1,74 @@
+name: Utc App CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: "portfolio"
+  AWS_REGION: "us-east-1"
+  ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
+  ECR_REPO: "${{ secrets.ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/portfolio"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest test.py
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build Docker image
+        run: docker build -t $IMAGE_NAME .
+
+      - name: Tag Docker image
+        run: docker tag $IMAGE_NAME:latest $ECR_REPO:latest
+
+      - name: Push Docker image to ECR
+        run: docker push $ECR_REPO:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # Add your deploy step here (ECS, Lambda, EC2, S3, etc.)
+     # - name: Deploy Placeholder
+      #  run: echo "Add ECS/Lambda deploy steps here"
