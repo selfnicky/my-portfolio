@@ -7,26 +7,31 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ECR_REPO: ${{ secrets.REGISTRY_USER }}
+
+# 1️⃣ Docker Build
 jobs:
-  build:
+  docker_build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Node.js (if needed for lint/test)
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-        if: false
-
-      - name: Install dependencies (if needed)
-        run: npm install || echo "No package.json found"
-        if: false
 
       - name: Build Docker image
         run: |
           docker build -t ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} .
           docker tag ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} ${{ secrets.REGISTRY_USER }}/portfolio:latest
+
+# 2️⃣ Trivy Scan
+  trivy_scan:
+    needs: docker_build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.20.0
@@ -37,8 +42,14 @@ jobs:
           ignore-unfixed: true
         continue-on-error: true
 
+# 3️⃣ Push Docker Image
+  push_image:
+    needs: trivy_scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Push Docker image
-        if: success()
         env:
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           REGISTRY_PASS: ${{ secrets.REGISTRY_PASS }}
@@ -47,8 +58,9 @@ jobs:
           docker push ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
           docker push ${{ secrets.REGISTRY_USER }}/portfolio:latest
 
+# 4️⃣ SSH Deploy
   deploy:
-    needs: build
+    needs: push_image
     runs-on: ubuntu-latest
     steps:
       - name: SSH to Server and Deploy
@@ -62,12 +74,10 @@ jobs:
             docker pull ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
             docker run -d --name resume -p 8080:5001 ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
 
+# 5️⃣ ECS Deploy
   ecs_deploy:
-    needs: build
+    needs: push_image
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
     steps:
       - uses: actions/checkout@v4
 
