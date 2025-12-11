@@ -7,98 +7,187 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+# Add permissions for better control
 permissions:
   id-token: write
   contents: read
+  packages: write
 
 env:
   ECR_REPO: ${{ secrets.REGISTRY_USER }}
+  IMAGE_TAG: ${{ github.run_number }}
 
-# 1️⃣ Docker Build
+# Define stages for better visualization
 jobs:
+  # ========================
+  # STAGE 1: BUILD
+  # ========================
   docker_build:
+    name: "🏗️ Stage 1: Build Docker Image"
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ env.IMAGE_TAG }}
     steps:
-      - uses: actions/checkout@v4
+      - name: "📥 Checkout Code"
+        uses: actions/checkout@v4
 
-      - name: Build Docker image
+      - name: "🔄 Set up Docker Buildx"
+        uses: docker/setup-buildx-action@v3
+
+      - name: "🐳 Build Docker Image"
         run: |
-          docker build -t ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} .
-          docker tag ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} ${{ secrets.REGISTRY_USER }}/portfolio:latest
+          docker build -t ${{ secrets.REGISTRY_USER }}/portfolio:${{ env.IMAGE_TAG }} .
+          docker tag ${{ secrets.REGISTRY_USER }}/portfolio:${{ env.IMAGE_TAG }} ${{ secrets.REGISTRY_USER }}/portfolio:latest
+          
+      - name: "📝 Save Image Metadata"
+        run: |
+          echo "Image built: ${{ secrets.REGISTRY_USER }}/portfolio:${{ env.IMAGE_TAG }}"
+          echo "Run number: ${{ github.run_number }}"
+          echo "Commit SHA: ${{ github.sha }}"
 
-# 2️⃣ Trivy Scan
+  # ========================
+  # STAGE 2: SECURITY SCAN
+  # ========================
   trivy_scan:
+    name: "🔒 Stage 2: Security Scan"
     needs: docker_build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: "📥 Checkout Code"
+        uses: actions/checkout@v4
 
-      - name: Run Trivy vulnerability scanner
+      - name: "🔍 Run Trivy Vulnerability Scanner"
         uses: aquasecurity/trivy-action@0.20.0
         with:
-          image-ref: ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
-          format: table
-          exit-code: 1
+          image-ref: ${{ secrets.REGISTRY_USER }}/portfolio:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
-        continue-on-error: true
+          exit-code: 0  # Don't fail the build, just report
 
-# 3️⃣ Push Docker Image
+      - name: "📊 Upload Security Scan Results"
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ========================
+  # STAGE 3: PUSH TO REGISTRY
+  # ========================
   push_image:
+    name: "📦 Stage 3: Push to Registry"
     needs: trivy_scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: "📥 Checkout Code"
+        uses: actions/checkout@v4
 
-      - name: Push Docker image
-        env:
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          REGISTRY_PASS: ${{ secrets.REGISTRY_PASS }}
+      - name: "🔐 Login to Container Registry"
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASS }}
+
+      - name: "🚀 Push Docker Images"
         run: |
-          echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin
-          docker push ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
+          docker push ${{ secrets.REGISTRY_USER }}/portfolio:${{ env.IMAGE_TAG }}
           docker push ${{ secrets.REGISTRY_USER }}/portfolio:latest
+          echo "✅ Images pushed successfully!"
 
-# 4️⃣ SSH Deploy
-  deploy:
+  # ========================
+  # STAGE 4: DEPLOYMENTS
+  # ========================
+  
+  # Parallel deployment strategies
+  ssh_deploy:
+    name: "🚀 Stage 4a: SSH Deploy"
     needs: push_image
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'  # Only deploy from main
     steps:
-      - name: SSH to Server and Deploy
+      - name: "🔑 SSH to Server"
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.KEY }}
           script: |
-            docker rm -f resume || true
-            docker pull ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
-            docker run -d --name resume -p 8080:5001 ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
+            echo "🚀 Starting deployment..."
+            echo "📦 Pulling image: ${{ secrets.REGISTRY_USER }}/portfolio:${{ env.IMAGE_TAG }}"
+            
+            # Stop and remove existing container
+            docker rm -f resume || echo "No existing container to remove"
+            
+            # Pull new image
+            docker pull ${{ secrets.REGISTRY_USER }}/portfolio:${{ env.IMAGE_TAG }}
+            
+            # Run new container
+            docker run -d \
+              --name resume \
+              --restart unless-stopped \
+              -p 8080:5001 \
+              ${{ secrets.REGISTRY_USER }}/portfolio:${{ env.IMAGE_TAG }}
+            
+            echo "✅ Deployment completed!"
+            echo "🌐 Application available at: http://$(hostname -I | awk '{print $1}'):8080"
 
-# 5️⃣ ECS Deploy
   ecs_deploy:
+    name: "☁️ Stage 4b: ECS Deploy"
     needs: push_image
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'  # Only deploy from main
     steps:
-      - uses: actions/checkout@v4
+      - name: "📥 Checkout Code"
+        uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials (OIDC)
+      - name: "🔐 Configure AWS Credentials (OIDC)"
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Render ECS task definition with new image
+      - name: "📋 Render ECS Task Definition"
         id: taskdef
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: ecs-taskdef.json
           container-name: dev
-          image: ${{ env.ECR_REPO }}:latest
+          image: ${{ env.ECR_REPO }}/portfolio:${{ env.IMAGE_TAG }}
 
-      - name: Deploy to ECS service
+      - name: "🚀 Deploy to ECS"
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           cluster: nginx-fargate-cluster
           service: nginx-fargate-service
           task-definition: ${{ steps.taskdef.outputs.task-definition }}
           wait-for-service-stability: true
+          force-new-deployment: true
+
+  # ========================
+  # FINAL: NOTIFICATIONS
+  # ========================
+  notification:
+    name: "📢 Stage 5: Notifications"
+    needs: [ssh_deploy, ecs_deploy]
+    runs-on: ubuntu-latest
+    if: always()  # Run even if previous jobs fail
+    steps:
+      - name: "📊 Workflow Status"
+        run: |
+          echo "🎉 CI/CD Pipeline Completed!"
+          echo "=============================="
+          echo "Run Number: ${{ github.run_number }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Image: ${{ secrets.REGISTRY_USER }}/portfolio:${{ env.IMAGE_TAG }}"
+          echo "Deployments:"
+          echo "  - SSH: ${{ needs.ssh_deploy.result || 'N/A' }}"
+          echo "  - ECS: ${{ needs.ecs_deploy.result || 'N/A' }}"
+          
+      - name: "📨 Send Slack Notification"
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          author_name: CI/CD Pipeline
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
