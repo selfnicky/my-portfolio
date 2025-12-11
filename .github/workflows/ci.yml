@@ -13,34 +13,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1️⃣ Setup tools (optional - remove if not needed)
       - name: Set up Node.js (if needed for lint/test)
         uses: actions/setup-node@v4
         with:
           node-version: 20
-        if: false  # ← Set to true if you need Node.js
+        if: false
 
       - name: Install dependencies (if needed)
         run: npm install || echo "No package.json found"
-        if: false  # ← Set to true if you need npm install
+        if: false
 
-      # 2️⃣ Build Docker image
       - name: Build Docker image
         run: |
           docker build -t ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} .
           docker tag ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} ${{ secrets.REGISTRY_USER }}/portfolio:latest
 
-      # 3️⃣ Trivy Security Scan (with continue-on-error for now)
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.20.0
         with:
           image-ref: ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
           format: table
-          exit-code: 1         # fail if HIGH/CRITICAL vulnerabilities
+          exit-code: 1
           ignore-unfixed: true
-        continue-on-error: true  # ← Remove this after fixing vulnerabilities
+        continue-on-error: true
 
-      # 4️⃣ Push image to registry
       - name: Push Docker image
         if: success()
         env:
@@ -55,15 +51,33 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      # 5️⃣ Deploy via SSH to server
       - name: SSH to Server and Deploy
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.KEY }}
-          # port: ${{ secrets.PORT }}
           script: |
             docker rm -f resume || true
             docker pull ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
             docker run -d --name resume -p 8080:5001 ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
+
+  ecs_deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Render ECS task definition with new image
+        id: taskdef
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ecs-taskdef.json
+          container-name: dev
+          image: ${{ env.ECR_REPO }}:latest
+
+      - name: Deploy to ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          cluster: nginx-fargate-cluste
+          service: nginx-fargate-service
+          task-definition: ${{ steps.taskdef.outputs.task-definition }}
+          wait-for-service-stability: true
