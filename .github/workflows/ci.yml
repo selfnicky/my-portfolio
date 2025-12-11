@@ -82,8 +82,8 @@ jobs:
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: ecs-taskdef.json
-          container-name: nginx-fargate-cluster
-          image: ${{ env.ECR_REPO }}:1.0
+          container-name: nginx
+          image: ${{ env.ECR_REPO }}:dev-${{ github.run_number }}
 
       - name: Deploy to ECS service
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
