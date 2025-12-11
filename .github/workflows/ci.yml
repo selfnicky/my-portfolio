@@ -83,7 +83,7 @@ jobs:
         with:
           task-definition: ecs-taskdef.json
           container-name: dev
-          image: ${{ env.ECR_REPO }}:latest
+          image: ${{ env.ECR_REPO }}:1.0
 
       - name: Deploy to ECS service
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
