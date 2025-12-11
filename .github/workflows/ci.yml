@@ -65,21 +65,32 @@ jobs:
   ecs_deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Render ECS task definition with new image
-        id: taskdef
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: ecs-taskdef.json
-          container-name: dev
-          image: ${{ env.ECR_REPO }}:latest
+    - name: Configure AWS Credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws-region: us-east-1
 
-      - name: Deploy to ECS service
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          cluster: nginx-fargate-cluste
-          service: nginx-fargate-service
-          task-definition: ${{ steps.taskdef.outputs.task-definition }}
-          wait-for-service-stability: true
+    - name: Render ECS task definition with new image
+      id: taskdef
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: ecs-taskdef.json
+        container-name: dev
+        image: ${{ env.ECR_REPO }}:latest
+
+    - name: Deploy to ECS service
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      with:
+        cluster: nginx-fargate-cluster
+        service: nginx-fargate-service
+        task-definition: ${{ steps.taskdef.outputs.task-definition }}
+        wait-for-service-stability: true
+
