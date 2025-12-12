@@ -1,14 +1,14 @@
 {
-  "family": "nginx-fargate",
+  "family": "utc-app-task",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
-  "executionRoleArn": "arn:aws:iam::YOUR_ACCOUNT:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::487042309881:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
-      "name": "nginx",
-      "image": "nginx:latest",
+      "name": "app",
+      "image": "<IMAGE_URI>",
       "cpu": 0,
       "portMappings": [
         {
@@ -21,7 +21,7 @@
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/nginx-fargate",
+          "awslogs-group": "/ecs/utc-app",
           "awslogs-region": "us-east-1",
           "awslogs-stream-prefix": "ecs"
         }

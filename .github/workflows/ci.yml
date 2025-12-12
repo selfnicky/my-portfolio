@@ -1,60 +1,85 @@
-name: Deploy App
+name: Utc App CI/CD
 
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  id-token: write
+  contents: read
 
 env:
-  AWS_REGION: us-east-1
-  ECR_REPO: ${{ secrets.ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/portfolio
+  PYTHON_VERSION: "3.11"
+  AWS_REGION: "us-east-1"
+  IMAGE_NAME: "portfolio"
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  ECR_REPO: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/dev
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest test.py
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      
-      - uses: aws-actions/amazon-ecr-login@v2
-      
-      - run: |
-          docker build -t ${{ env.ECR_REPO }}:${{ github.sha }} .
-          docker tag ${{ env.ECR_REPO }}:${{ github.sha }} ${{ env.ECR_REPO }}:latest
-          docker push ${{ env.ECR_REPO }}:${{ github.sha }}
-          docker push ${{ env.ECR_REPO }}:latest
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build Docker image
+        run: docker build -t $IMAGE_NAME .
+
+      - name: Tag Docker image
+        run: docker tag $IMAGE_NAME:latest $ECR_REPO:latest
+
+      - name: Push Docker image to ECR
+        run: docker push $ECR_REPO:latest
 
   ecs_deploy:
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      
-      - uses: aws-actions/amazon-ecs-render-task-definition@v1
-        id: taskdef
+
+      - name: Render ECS task definition with new image
+        id: render-task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: ecs-taskdef.json
-          container-name: nginx
-          image: ${{ env.ECR_REPO }}:${{ github.sha }}
-      
-      - uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+          container-name: app
+          image: ${{ env.ECR_REPO }}:latest
+
+      - name: Deploy ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           cluster: nginx-fargate-cluster
           service: nginx-fargate-service
-          task-definition: ${{ steps.taskdef.outputs.task-definition }}
+          task-definition: ${{ steps.render-task.outputs.task-definition }}
           wait-for-service-stability: true
-          force-new-deployment: true
