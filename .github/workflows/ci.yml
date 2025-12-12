@@ -1,47 +1,33 @@
-name: CI/CD Pipeline
+name: Deploy App
 
 on:
   push:
     branches: ["main"]
-  workflow_dispatch:
 
 env:
-  ECR_REPO: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/dev
   AWS_REGION: us-east-1
+  ECR_REPO: ${{ secrets.ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/portfolio
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials for ECR
-        uses: aws-actions/configure-aws-credentials@v4
+      
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build Docker image for ECR
-        run: |
-          docker build -t ${{ env.ECR_REPO }}:${{ github.run_number }} .
-          docker tag ${{ env.ECR_REPO }}:${{ github.run_number }} ${{ env.ECR_REPO }}:latest
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.20.0
-        with:
-          image-ref: ${{ env.ECR_REPO }}:${{ github.run_number }}
-          format: table
-          exit-code: 1
-          ignore-unfixed: true
-        continue-on-error: true
-
-      - name: Push Docker image to ECR
-        run: |
-          docker push ${{ env.ECR_REPO }}:${{ github.run_number }}
+      
+      - uses: aws-actions/amazon-ecr-login@v2
+      
+      - run: |
+          docker build -t ${{ env.ECR_REPO }}:${{ github.sha }} .
+          docker tag ${{ env.ECR_REPO }}:${{ github.sha }} ${{ env.ECR_REPO }}:latest
+          docker push ${{ env.ECR_REPO }}:${{ github.sha }}
           docker push ${{ env.ECR_REPO }}:latest
 
   ecs_deploy:
@@ -52,113 +38,23 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Show current task definition ports
-        run: |
-          echo "=== Current port mapping in ecs-taskdef.json ==="
-          cat ecs-taskdef.json | jq '.containerDefinitions[0].portMappings'
-          echo ""
-          echo "Note: Make sure your Flask app runs on port 80 to match this configuration"
-
-      - name: Render ECS task definition with new image
+      
+      - uses: aws-actions/amazon-ecs-render-task-definition@v1
         id: taskdef
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: ecs-taskdef.json
           container-name: nginx
-          image: ${{ env.ECR_REPO }}:${{ github.run_number }}
-
-      - name: Deploy to ECS service
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+          image: ${{ env.ECR_REPO }}:${{ github.sha }}
+      
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           cluster: nginx-fargate-cluster
           service: nginx-fargate-service
           task-definition: ${{ steps.taskdef.outputs.task-definition }}
           wait-for-service-stability: true
           force-new-deployment: true
-
-      - name: Wait for deployment
-        run: |
-          echo "Waiting for deployment to complete..."
-          sleep 30
-          
-          # Check deployment status
-          aws ecs describe-services \
-            --cluster nginx-fargate-cluster \
-            --services nginx-fargate-service \
-            --query 'services[0].deployments[?status==`PRIMARY`] | [0] | {desiredCount: .desiredCount, runningCount: .runningCount, status: .status}'
-
-      - name: Verify deployment
-        run: |
-          echo "=== Verifying deployment ==="
-          
-          # Get running task
-          TASK_ARN=$(aws ecs list-tasks \
-            --cluster nginx-fargate-cluster \
-            --service nginx-fargate-service \
-            --query 'taskArns[0]' \
-            --output text)
-          
-          if [ "$TASK_ARN" != "None" ]; then
-            echo "Task ARN: $TASK_ARN"
-            
-            # Show container details
-            echo ""
-            echo "=== Container Details ==="
-            aws ecs describe-tasks \
-              --cluster nginx-fargate-cluster \
-              --tasks $TASK_ARN \
-              --query 'tasks[0].containers[].{name: .name, image: .image, lastStatus: .lastStatus}'
-            
-            # Get public IP
-            echo ""
-            echo "=== Getting Public IP ==="
-            ENI_ID=$(aws ecs describe-tasks \
-              --cluster nginx-fargate-cluster \
-              --tasks $TASK_ARN \
-              --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' \
-              --output text)
-            
-            if [ -n "$ENI_ID" ] && [ "$ENI_ID" != "None" ]; then
-              PUBLIC_IP=$(aws ec2 describe-network-interfaces \
-                --network-interface-ids $ENI_ID \
-                --query 'NetworkInterfaces[0].Association.PublicIp' \
-                --output text)
-              
-              if [ -n "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "None" ]; then
-                echo "Public IP: $PUBLIC_IP"
-                echo "Test URL: http://$PUBLIC_IP"
-                echo ""
-                echo "=== Testing connection ==="
-                curl -s --max-time 10 http://$PUBLIC_IP | head -c 200 || echo "Connection failed"
-              else
-                echo "No public IP found (might be in private subnet)"
-              fi
-            else
-              echo "No network interface found"
-            fi
-          else
-            echo "No tasks running!"
-          fi
-
-  # Optional SSH deploy
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: SSH to Server and Deploy
-        uses: appleboy/ssh-action@v1.2.2
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.KEY }}
-          script: |
-            docker rm -f resume || true
-            docker pull ${{ env.ECR_REPO }}:${{ github.run_number }}
-            docker run -d --name resume -p 8080:5001 ${{ env.ECR_REPO }}:${{ github.run_number }}
