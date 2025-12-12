@@ -74,7 +74,7 @@ jobs:
         with:
           task-definition: ecs-taskdef.json
           container-name: nginx
-          image: ${{ env.ECR_REPO }}:latest
+          image: ${{ env.ECR_REPO }}:1.0 
 
       - name: Deploy ECS task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
