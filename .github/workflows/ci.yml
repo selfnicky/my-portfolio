@@ -7,6 +7,10 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+env:
+  ECR_REPO: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/dev
+  AWS_REGION: us-east-1
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,29 +27,34 @@ jobs:
         run: npm install || echo "No package.json found"
         if: false
 
-      - name: Build Docker image
+      - name: Configure AWS credentials for ECR
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image for ECR
         run: |
-          docker build -t ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} .
-          docker tag ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }} ${{ secrets.REGISTRY_USER }}/portfolio:latest
+          docker build -t ${{ env.ECR_REPO }}:${{ github.run_number }} .
+          docker tag ${{ env.ECR_REPO }}:${{ github.run_number }} ${{ env.ECR_REPO }}:latest
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.20.0
         with:
-          image-ref: ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
+          image-ref: ${{ env.ECR_REPO }}:${{ github.run_number }}
           format: table
           exit-code: 1
           ignore-unfixed: true
         continue-on-error: true
 
-      - name: Push Docker image
-        if: success()
-        env:
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          REGISTRY_PASS: ${{ secrets.REGISTRY_PASS }}
+      - name: Push Docker image to ECR
         run: |
-          echo "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin
-          docker push ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
-          docker push ${{ secrets.REGISTRY_USER }}/portfolio:latest
+          docker push ${{ env.ECR_REPO }}:${{ github.run_number }}
+          docker push ${{ env.ECR_REPO }}:latest
 
   deploy:
     needs: build
@@ -59,8 +68,8 @@ jobs:
           key: ${{ secrets.KEY }}
           script: |
             docker rm -f resume || true
-            docker pull ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
-            docker run -d --name resume -p 8080:5001 ${{ secrets.REGISTRY_USER }}/portfolio:${{ github.run_number }}
+            docker pull ${{ env.ECR_REPO }}:${{ github.run_number }}
+            docker run -d --name resume -p 8080:5001 ${{ env.ECR_REPO }}:${{ github.run_number }}
 
   ecs_deploy:
     needs: build
@@ -75,7 +84,21 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Debug - Show image info
+        run: |
+          echo "ECR_REPO: ${{ env.ECR_REPO }}"
+          echo "GitHub Run Number: ${{ github.run_number }}"
+          echo "Full image tag: ${{ env.ECR_REPO }}:${{ github.run_number }}"
+
+      - name: Verify ECR image exists
+        run: |
+          echo "Checking if image exists in ECR repository: dev"
+          aws ecr describe-images \
+            --repository-name dev \
+            --image-ids imageTag=${{ github.run_number }} \
+            --query 'imageDetails[0].imageTags'
 
       - name: Render ECS task definition with new image
         id: taskdef
@@ -83,7 +106,7 @@ jobs:
         with:
           task-definition: ecs-taskdef.json
           container-name: nginx
-          image: ${{ env.ECR_REPO }}:dev-${{ github.run_number }}
+          image: ${{ env.ECR_REPO }}:${{ github.run_number }}
 
       - name: Deploy to ECS service
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
@@ -92,3 +115,40 @@ jobs:
           service: nginx-fargate-service
           task-definition: ${{ steps.taskdef.outputs.task-definition }}
           wait-for-service-stability: true
+          force-new-deployment: true
+
+      - name: Verify the deployment
+        run: |
+          echo "Waiting for deployment to stabilize..."
+          sleep 30
+          
+          echo "=== Checking ECS service status ==="
+          aws ecs describe-services \
+            --cluster nginx-fargate-cluster \
+            --services nginx-fargate-service \
+            --query 'services[0].{status:status, runningCount:runningCount, desiredCount:desiredCount, taskDefinition:taskDefinition}'
+          
+          echo ""
+          echo "=== Checking running tasks ==="
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster nginx-fargate-cluster \
+            --service nginx-fargate-service \
+            --query 'taskArns[0]' \
+            --output text)
+          
+          if [ "$TASK_ARN" != "None" ]; then
+            echo "Task ARN: $TASK_ARN"
+            echo "Container image in use:"
+            aws ecs describe-tasks \
+              --cluster nginx-fargate-cluster \
+              --tasks $TASK_ARN \
+              --query 'tasks[0].containers[].{name:name, image:image}'
+            
+            echo ""
+            echo "=== Task definition details ==="
+            aws ecs describe-task-definition \
+              --task-definition nginx-fargate \
+              --query 'taskDefinition.containerDefinitions[].{name:name, image:image}'
+          else
+            echo "No tasks found!"
+          fi
