@@ -15,14 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show Dockerfile info
-        run: |
-          echo "=== Dockerfile Contents ==="
-          cat Dockerfile || echo "No Dockerfile found"
-          echo ""
-          echo "=== Directory Contents ==="
-          ls -la
-
       - name: Configure AWS credentials for ECR
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -35,19 +27,8 @@ jobs:
 
       - name: Build Docker image for ECR
         run: |
-          echo "Building image: ${{ env.ECR_REPO }}:${{ github.run_number }}"
           docker build -t ${{ env.ECR_REPO }}:${{ github.run_number }} .
           docker tag ${{ env.ECR_REPO }}:${{ github.run_number }} ${{ env.ECR_REPO }}:latest
-
-      - name: Test the built image locally
-        run: |
-          echo "Testing the built image..."
-          docker run -d --name test-app -p 8081:80 ${{ env.ECR_REPO }}:${{ github.run_number }}
-          sleep 5
-          echo "=== Curl response ==="
-          curl -s http://localhost:8081 | head -20 || echo "Curl failed"
-          docker stop test-app
-          docker rm test-app
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.20.0
@@ -78,43 +59,12 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Show current ECS state
+      - name: Show current task definition ports
         run: |
-          echo "=== Current ECS Service ==="
-          aws ecs describe-services \
-            --cluster nginx-fargate-cluster \
-            --services nginx-fargate-service \
-            --query 'services[0].{taskDefinition:taskDefinition, runningCount:runningCount, desiredCount:desiredCount}'
-          
+          echo "=== Current port mapping in ecs-taskdef.json ==="
+          cat ecs-taskdef.json | jq '.containerDefinitions[0].portMappings'
           echo ""
-          echo "=== Current Task Definition ==="
-          CURRENT_TASK_DEF=$(aws ecs describe-services \
-            --cluster nginx-fargate-cluster \
-            --services nginx-fargate-service \
-            --query 'services[0].taskDefinition' \
-            --output text)
-          
-          aws ecs describe-task-definition \
-            --task-definition $CURRENT_TASK_DEF \
-            --query 'taskDefinition.containerDefinitions[].{name:name, image:image}'
-
-      - name: Verify ECR image exists
-        run: |
-          echo "=== Checking ECR for image ==="
-          aws ecr describe-images \
-            --repository-name dev \
-            --image-ids imageTag=${{ github.run_number }} \
-            --query 'imageDetails[0].{imageTags:imageTags, size:imageSizeInBytes}' || \
-          echo "⚠️ Image not found in ECR!"
-
-      - name: Clean task definition JSON
-        run: |
-          echo "=== Cleaning task definition JSON ==="
-          # Remove read-only fields from ecs-taskdef.json
-          cp ecs-taskdef.json ecs-taskdef-clean.json
-          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' ecs-taskdef-clean.json > ecs-taskdef-cleaned.json
-          mv ecs-taskdef-cleaned.json ecs-taskdef.json
-          echo "Cleaned JSON ready for use"
+          echo "Note: Make sure your Flask app runs on port 80 to match this configuration"
 
       - name: Render ECS task definition with new image
         id: taskdef
@@ -123,11 +73,6 @@ jobs:
           task-definition: ecs-taskdef.json
           container-name: nginx
           image: ${{ env.ECR_REPO }}:${{ github.run_number }}
-
-      - name: Show rendered image
-        run: |
-          echo "=== Rendered Task Definition Image ==="
-          echo '${{ steps.taskdef.outputs.task-definition }}' | jq '.containerDefinitions[0].image'
 
       - name: Deploy to ECS service
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
@@ -140,78 +85,40 @@ jobs:
 
       - name: Wait for deployment
         run: |
-          echo "Waiting for service to stabilize..."
-          # Wait for up to 3 minutes
-          for i in {1..12}; do
-            STATUS=$(aws ecs describe-services \
-              --cluster nginx-fargate-cluster \
-              --services nginx-fargate-service \
-              --query 'services[0].deployments[?status==`PRIMARY`].runningCount' \
-              --output text)
-            
-            DESIRED=$(aws ecs describe-services \
-              --cluster nginx-fargate-cluster \
-              --services nginx-fargate-service \
-              --query 'services[0].deployments[?status==`PRIMARY`].desiredCount' \
-              --output text)
-            
-            echo "Deployment progress: $STATUS/$DESIRED tasks running"
-            
-            if [ "$STATUS" = "$DESIRED" ] && [ -n "$STATUS" ]; then
-              echo "✓ Deployment complete!"
-              break
-            fi
-            
-            sleep 15
-          done
+          echo "Waiting for deployment to complete..."
+          sleep 30
+          
+          # Check deployment status
+          aws ecs describe-services \
+            --cluster nginx-fargate-cluster \
+            --services nginx-fargate-service \
+            --query 'services[0].deployments[?status==`PRIMARY`] | [0] | {desiredCount: .desiredCount, runningCount: .runningCount, status: .status}'
 
       - name: Verify deployment
         run: |
-          echo "=== Final Verification ==="
+          echo "=== Verifying deployment ==="
           
-          # Get current task definition
-          CURRENT_TASK_DEF=$(aws ecs describe-services \
-            --cluster nginx-fargate-cluster \
-            --services nginx-fargate-service \
-            --query 'services[0].taskDefinition' \
-            --output text)
-          
-          echo "Current Task Definition: $CURRENT_TASK_DEF"
-          
-          # Show what image is in the task definition
-          echo ""
-          echo "=== Task Definition Image ==="
-          aws ecs describe-task-definition \
-            --task-definition $CURRENT_TASK_DEF \
-            --query 'taskDefinition.containerDefinitions[].{name:name, image:image}'
-          
-          # Show running tasks
-          echo ""
-          echo "=== Running Tasks ==="
-          TASK_ARNS=$(aws ecs list-tasks \
+          # Get running task
+          TASK_ARN=$(aws ecs list-tasks \
             --cluster nginx-fargate-cluster \
             --service nginx-fargate-service \
-            --query 'taskArns[]' \
+            --query 'taskArns[0]' \
             --output text)
           
-          if [ -n "$TASK_ARNS" ]; then
-            for TASK_ARN in $TASK_ARNS; do
-              echo "Task: $(echo $TASK_ARN | cut -d'/' -f2)"
-              aws ecs describe-tasks \
-                --cluster nginx-fargate-cluster \
-                --tasks $TASK_ARN \
-                --query 'tasks[0].containers[].{name:name, image:image, lastStatus:lastStatus}'
-              echo ""
-            done
-          else
-            echo "No tasks running!"
-          fi
-          
-          # Get public IP if available
-          echo ""
-          echo "=== Network Information ==="
-          if [ -n "$TASK_ARNS" ]; then
-            TASK_ARN=$(echo $TASK_ARNS | cut -d' ' -f1)
+          if [ "$TASK_ARN" != "None" ]; then
+            echo "Task ARN: $TASK_ARN"
+            
+            # Show container details
+            echo ""
+            echo "=== Container Details ==="
+            aws ecs describe-tasks \
+              --cluster nginx-fargate-cluster \
+              --tasks $TASK_ARN \
+              --query 'tasks[0].containers[].{name: .name, image: .image, lastStatus: .lastStatus}'
+            
+            # Get public IP
+            echo ""
+            echo "=== Getting Public IP ==="
             ENI_ID=$(aws ecs describe-tasks \
               --cluster nginx-fargate-cluster \
               --tasks $TASK_ARN \
@@ -228,19 +135,22 @@ jobs:
                 echo "Public IP: $PUBLIC_IP"
                 echo "Test URL: http://$PUBLIC_IP"
                 echo ""
-                echo "=== Testing connectivity ==="
-                curl -s -I --connect-timeout 5 http://$PUBLIC_IP || echo "Cannot connect to $PUBLIC_IP"
+                echo "=== Testing connection ==="
+                curl -s --max-time 10 http://$PUBLIC_IP | head -c 200 || echo "Connection failed"
               else
                 echo "No public IP found (might be in private subnet)"
               fi
+            else
+              echo "No network interface found"
             fi
+          else
+            echo "No tasks running!"
           fi
 
-  # Optional: Keep SSH deploy if you still need it
+  # Optional SSH deploy
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    if: false  # Disabled for now, remove if you need it
     steps:
       - name: SSH to Server and Deploy
         uses: appleboy/ssh-action@v1.2.2
@@ -251,4 +161,4 @@ jobs:
           script: |
             docker rm -f resume || true
             docker pull ${{ env.ECR_REPO }}:${{ github.run_number }}
-            docker run -d --name resume -p 8080:80 ${{ env.ECR_REPO }}:${{ github.run_number }}
+            docker run -d --name resume -p 8080:5001 ${{ env.ECR_REPO }}:${{ github.run_number }}
